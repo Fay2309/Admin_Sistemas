@@ -716,7 +716,26 @@ function Install-NginxVersion {
         echo "Instalando versión $version"
         $downloadUrl = "https://nginx.org/download/nginx-$version.zip"
         $zipFile = "C:\nginx\nginx-$version.zip"
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipFile -UseBasicParsing
+            if ($downloadMethod -eq "1") {
+        # Descargar desde la web oficial
+        if ($tomcatVersion -like "10.*") {
+            $downloadUrl = "https://dlcdn.apache.org/tomcat/tomcat-10/v$tomcatVersion/bin/apache-tomcat-$tomcatVersion-windows-x64.zip"
+        } elseif ($tomcatVersion -like "11.*") {
+            $downloadUrl = "https://dlcdn.apache.org/tomcat/tomcat-11/v$tomcatVersion/bin/apache-tomcat-$tomcatVersion-windows-x64.zip"
+        } else {
+            Write-Host "Error: Versión de Tomcat no válida."
+            return
+        }
+
+        Write-Host "Descargando Tomcat $tomcatVersion desde la web oficial..."
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipFile
+    } elseif ($downloadMethod -eq "2") {
+        # Descargar desde el servidor FTP
+        Write-Host "Hola profe"
+    } else {
+        Write-Host "Opción no válida. Saliendo..."
+        return
+    }
 
         # Extraer el archivo ZIP
         Expand-Archive -Path $zipFile -DestinationPath "C:\nginx" -Force
@@ -810,5 +829,528 @@ function Install-IIS {
         }
     } catch {
         Write-Host "Error: No se pudo verificar el puerto $port. Asegúrate de que sea un puerto válido."
+    }
+}
+
+#------------------------------------------------------------- SSL
+
+# Función para instalar Tomcat con SSL
+function Install-Tomcatssl {
+    param (
+        [string]$tomcatVersion,
+        [int]$port
+    )
+
+    # Definir la ruta de descarga y el archivo ZIP
+    $zipFile = "C:\Temp\apache-tomcat-$tomcatVersion.zip"
+
+    if ($downloadMethod -eq "1") {
+        # Descargar desde la web oficial
+        if ($tomcatVersion -like "10.*") {
+            $downloadUrl = "https://dlcdn.apache.org/tomcat/tomcat-10/v$tomcatVersion/bin/apache-tomcat-$tomcatVersion-windows-x64.zip"
+        } elseif ($tomcatVersion -like "11.*") {
+            $downloadUrl = "https://dlcdn.apache.org/tomcat/tomcat-11/v$tomcatVersion/bin/apache-tomcat-$tomcatVersion-windows-x64.zip"
+        } else {
+            Write-Host "Error: Versión de Tomcat no válida."
+            return
+        }
+
+        Write-Host "Descargando Tomcat $tomcatVersion desde la web oficial..."
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipFile
+    } elseif ($downloadMethod -eq "2") {
+        # Descargar desde el servidor FTP
+        Write-Host "Navegando por el servidor FTP para seleccionar el archivo de Tomcat..."
+        Navegar-FTP
+
+        # Verificar si el archivo seleccionado existe
+        if (!(Test-Path $zipFile)) {
+            Write-Host "Error: No se encontró el archivo descargado."
+            return
+        }
+    } else {
+        Write-Host "Opción no válida. Saliendo..."
+        return
+    }
+
+    # Rutas de instalación
+    $installPath = "C:\Tomcat\apache-tomcat-$tomcatVersion"
+    $serviceName = "Tomcat$($tomcatVersion.Split('.')[0])"
+    $serverXmlPath = "$installPath\conf\server.xml"
+
+    # Verificar si el servicio ya existe
+    if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+        Write-Host "El servicio $serviceName ya existe. Saliendo..."
+        return
+    }
+
+    # Extraer archivos
+    Write-Host "Extrayendo archivos..."
+    Expand-Archive -Path $zipFile -DestinationPath "C:\Tomcat" -Force
+
+    # Verificar que server.xml exista
+    if (!(Test-Path $serverXmlPath)) {
+        Write-Host "Error: No se encontró server.xml."
+        return
+    }
+
+    # Configurar el puerto HTTP
+    (Get-Content $serverXmlPath) -replace 'port="8080"', "port=`"$port`"" | Set-Content $serverXmlPath
+
+    # Agregar configuración SSL dentro de `<Service>` correctamente
+    $httpsPort = $port + 100
+    Write-Host "Configurando SSL en el puerto $httpsPort..."
+
+    $sslConfig = @"
+<Connector port="$httpsPort" protocol="org.apache.coyote.http11.Http11NioProtocol"
+           maxThreads="200"
+           SSLEnabled="true">
+    <SSLHostConfig>
+        <Certificate certificateKeystoreFile="conf/tomcat.keystore"
+                     type="RSA"
+                     certificateKeystorePassword="MiClaveSSL"/>
+    </SSLHostConfig>
+</Connector>
+"@
+
+    # Insertar el bloque SSL antes de `</Service>`
+    (Get-Content $serverXmlPath) -replace '</Service>', "$sslConfig`n</Service>" | Set-Content $serverXmlPath
+
+    # Generar el keystore solo si no existe
+    $keystorePath = "$installPath\conf\tomcat.keystore"
+    if (!(Test-Path $keystorePath)) {
+        Write-Host "Generando el keystore SSL..."
+        $pfxFile = "C:\Temp\tomcat.pfx"
+        $certThumbprint = "74178FEF3C759C17538FF26D10B83BA051E0F27E"
+
+        $cert = Get-Item "Cert:\LocalMachine\My\$certThumbprint" -ErrorAction SilentlyContinue
+        if ($cert) {
+            Export-PfxCertificate -Cert $cert -FilePath $pfxFile -Password (ConvertTo-SecureString -String "MiClaveSSL" -AsPlainText -Force)
+
+            # Convertir PFX a Java Keystore
+            $javaHome = [System.Environment]::GetEnvironmentVariable("JAVA_HOME", "Machine")
+            $keytool = "$javaHome\bin\keytool.exe"
+            if (Test-Path $keytool) {
+                Start-Process -NoNewWindow -FilePath $keytool -ArgumentList @(
+                    "-importkeystore",
+                    "-srckeystore `"$pfxFile`"",
+                    "-srcstoretype PKCS12",
+                    "-srcstorepass MiClaveSSL",
+                    "-destkeystore `"$keystorePath`"",
+                    "-deststoretype JKS",
+                    "-deststorepass MiClaveSSL"
+                ) -Wait
+                Write-Host "Keystore generado correctamente."
+            } else {
+                Write-Host "Error: No se encontró keytool.exe en JAVA_HOME."
+            }
+        } else {
+            Write-Host "Error: No se encontró el certificado con la huella especificada."
+        }
+    } else {
+        Write-Host "El keystore ya existe, omitiendo creación."
+    }
+
+    # Verifica si web.xml existe; si no, lo crea vacío con web-app
+    $webXmlPath = "$installPath\webapps\ROOT\WEB-INF\web.xml"
+    if (!(Test-Path $webXmlPath)) {
+        New-Item -Path $webXmlPath -ItemType File -Force | Out-Null
+        Set-Content -Path $webXmlPath -Value "<?xml version=`"1.0`" encoding=`"UTF-8`"?>`n<web-app></web-app>"
+    }
+
+    # Agregar security-constraint DENTRO de <web-app>, si no está presente
+    $securityConfig = @"
+<security-constraint>
+    <web-resource-collection>
+        <web-resource-name>Protected Context</web-resource-name>
+        <url-pattern>/*</url-pattern>
+    </web-resource-collection>
+    <user-data-constraint>
+        <transport-guarantee>CONFIDENTIAL</transport-guarantee>
+    </user-data-constraint>
+</security-constraint>
+"@
+
+    # Insertarlo dentro de <web-app> si no está presente
+    if (-not (Select-String -Path $webXmlPath -Pattern "<security-constraint>" -Quiet)) {
+        (Get-Content $webXmlPath) -replace '</web-app>', "$securityConfig`n</web-app>" | Set-Content $webXmlPath
+    } else {
+        Write-Host "La configuración de seguridad ya está en web.xml."
+    }
+
+    # Instalar y empezar el servicio
+    Write-Host "Instalando el servicio $serviceName..."
+    cd "$installPath\bin"
+    .\service.bat install $serviceName
+
+    Start-Service -Name $serviceName
+    Write-Host "Tomcat $tomcatVersion ha sido instalado y configurado en HTTPS $httpsPort."
+}
+
+
+function Install-Nginxssl {
+    param (
+        [string]$nginxDescargas = "https://nginx.org/en/download.html"
+    )
+
+    # Obtener la página de descargas de Nginx
+    $paginaNginx = (Invoke-WebRequest -Uri $nginxDescargas -UseBasicParsing).Content
+
+    # Expresión regular para encontrar versiones de Nginx
+    $versionRegex = 'nginx-(\d+\.\d+\.\d+)\.zip'
+
+    # Encontrar todas las versiones en la página
+    $versiones = [regex]::Matches($paginaNginx, $versionRegex) | ForEach-Object { $_.Groups[1].Value }
+
+    # Asignar versiones LTS y de desarrollo
+    $versionLTSNginx = $versiones[6]  
+    $versionDevNginx = $versiones[0]  
+
+    # Menú de selección de versión
+    echo "Instalador de Nginx"
+    echo "1. Versión LTS $versionLTSNginx"
+    echo "2. Versión de desarrollo $versionDevNginx"
+    echo "3. Salir"
+    $opcNginx = Read-Host "Selecciona una versión"
+
+    switch ($opcNginx) {
+        "1" {
+            $port = Get-ValidPort
+            Install-NginxVersionssl -version $versionLTSNginx -port $port
+        }
+        "2" {
+            $port = Get-ValidPort
+            Install-NginxVersionssl -version $versionDevNginx -port $port
+        }
+        "3" {
+           return
+        }
+        default {
+            echo "Seleccione una opción válida..."
+        }
+    }
+}
+
+function Install-NginxVersionssl {
+    param (
+        [string]$version,
+        [int]$port
+    )
+
+    try {
+        # Detener Nginx si está corriendo
+        Stop-Process -Name nginx -ErrorAction SilentlyContinue
+
+        # Crear carpeta C:\nginx si no existe
+        if (-not (Test-Path "C:\nginx")) {
+            New-Item -ItemType Directory -Path "C:\nginx"
+        }
+
+        # Descargar e instalar Nginx
+        Write-Host "Instalando versión $version..."
+        $downloadUrl = "https://nginx.org/download/nginx-$version.zip"
+        $zipFile = "C:\nginx\nginx-$version.zip"
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipFile -UseBasicParsing
+        Expand-Archive -Path $zipFile -DestinationPath "C:\nginx" -Force
+
+        # Definir rutas
+        $nginxDir = "C:\nginx\nginx-$version"
+        $nginxConfigPath = "$nginxDir\conf\nginx.conf"
+        $pfxFile = "$nginxDir\conf\nginx.pfx"
+        $sslCertPath = "$nginxDir\conf\certificado.pem"
+        $sslKeyPath = "$nginxDir\conf\certificado.key"
+
+        # Configurar el puerto HTTP en nginx.conf
+        $nginxConfig = Get-Content $nginxConfigPath
+
+        # Modificar el bloque server para el puerto HTTP
+        $nginxConfig = $nginxConfig -replace "listen\s+\d+;", "listen $port;"
+
+        # Definir el puerto HTTPS
+        $httpsPort = $port + 100
+        Write-Host "Configurando SSL en el puerto $httpsPort..."
+
+        # Generar certificado SSL si no existe
+        $certThumbprint = "8492C08EA49780DF8036679F7DA9243C15B5AF09"
+
+        if (!(Test-Path $pfxFile)) {
+            Write-Host "Generando certificado SSL..."
+            $cert = Get-Item "Cert:\LocalMachine\My\$certThumbprint" -ErrorAction SilentlyContinue
+            if ($cert) {
+                Export-PfxCertificate -Cert $cert -FilePath $pfxFile -Password (ConvertTo-SecureString -String "MiClaveSSL" -AsPlainText -Force)
+
+                # Buscar OpenSSL
+                $opensslPath = (Get-Command openssl -ErrorAction SilentlyContinue).Source
+                if ($opensslPath) {
+                    Start-Process -NoNewWindow -FilePath $opensslPath -ArgumentList @(
+                        "pkcs12", "-in", "`"$pfxFile`"", "-out", "`"$sslCertPath`"", "-clcerts", "-nokeys", "-password", "pass:MiClaveSSL"
+                    ) -Wait
+                    Start-Process -NoNewWindow -FilePath $opensslPath -ArgumentList @(
+                        "pkcs12", "-in", "`"$pfxFile`"", "-nocerts", "-out", "`"$sslKeyPath`"", "-nodes", "-password", "pass:MiClaveSSL"
+                    ) -Wait
+                    Write-Host "Certificado convertido correctamente."
+                } else {
+                    Write-Host "Error: No se encontró OpenSSL. SSL no configurado."
+                    return
+                }
+            } else {
+                Write-Host "Error: No se encontró el certificado con la huella especificada."
+                return
+            }
+        } else {
+            Write-Host "El certificado ya existe, omitiendo creación."
+        }
+
+        # Insertar configuración SSL dentro del bloque server
+        $nginxConfig = $nginxConfig -replace "(server\s*{[^}]*listen\s+$port;)", "`$1`n    listen $httpsPort ssl;`n    ssl_certificate $sslCertPath;`n    ssl_certificate_key $sslKeyPath;"
+
+        # Guardar cambios en nginx.conf
+        Set-Content -Path $nginxConfigPath -Value $nginxConfig
+
+        # Iniciar Nginx
+        Start-Process -NoNewWindow -FilePath "$nginxDir\nginx.exe" -ArgumentList "-p `"$nginxDir`""
+
+        # Verificar que Nginx esté en ejecución
+        $nginxProcess = Get-Process | Where-Object { $_.ProcessName -like "*nginx*" }
+        if ($nginxProcess) {
+            Write-Host "Nginx está en ejecución."
+        } else {
+            Write-Host "Error: Nginx no se inició correctamente."
+            return
+        }
+
+        # Verificar que el puerto HTTPS esté escuchando
+        Write-Host "Verificando si el puerto HTTPS $httpsPort está escuchando..."
+        try {
+            $httpsPortListening = Test-NetConnection -ComputerName localhost -Port $httpsPort -ErrorAction Stop
+            if ($httpsPortListening.TcpTestSucceeded) {
+                Write-Host "Nginx está corriendo correctamente en https://localhost:$httpsPort"
+            } else {
+                Write-Host "Error: El puerto HTTPS $httpsPort no está escuchando. Revisa la configuración de Nginx."
+            }
+        } catch {
+            Write-Host "Error: No se pudo verificar el puerto HTTPS $httpsPort. Asegúrate de que sea un puerto válido."
+        }
+    }
+    catch {
+        Write-Host "Error: $($_.Exception.Message)"
+    }
+}
+
+
+
+function Install-IISssl {
+    # Verificar si IIS está instalado
+    $iisFeature = Get-WindowsFeature -Name Web-Server
+    if ($iisFeature.Installed -eq $false) {
+        Write-Host "IIS no está instalado. Instalando..."
+        Install-WindowsFeature -Name Web-Server -IncludeManagementTools -NoProgress
+    } else {
+        Write-Host "IIS ya está instalado."
+    }
+
+    # Obtener un puerto válido
+    $port = Get-ValidPort
+
+    # Validar que el puerto sea válido antes de continuar
+    if ($port -lt 1 -or $port -gt 65535) {
+        Write-Host "Error: El puerto $port no es válido. Debe estar entre 1 y 65535."
+        return
+    }
+
+    # Iniciar el servicio IIS si no está corriendo
+    if ((Get-Service -Name W3SVC).Status -ne "Running") {
+        Write-Host "Iniciando el servicio IIS..."
+        Start-Service -Name W3SVC
+    }
+
+    # Importar módulo de administración web
+    Import-Module WebAdministration
+
+    # Verificar si el sitio predeterminado existe
+    $defaultSite = Get-WebSite -Name "Default Web Site" -ErrorAction SilentlyContinue
+    if ($defaultSite) {
+        Write-Host "El sitio 'Default Web Site' ya existe. Configurando..."
+        Stop-WebSite -Name "Default Web Site"
+
+        # Verificar si hay un binding en el puerto 80 antes de eliminarlo
+        $binding80 = Get-WebBinding -Name "Default Web Site" | Where-Object { $_.bindingInformation -eq "*:80:" }
+        if ($binding80) {
+            Remove-WebBinding -Name "Default Web Site" -BindingInformation "*:80:"
+        }
+
+        # Verificar si el binding en el nuevo puerto ya existe antes de agregarlo
+        $existingBinding = Get-WebBinding -Name "Default Web Site" | Where-Object { $_.bindingInformation -match "\*:$($port):" }
+        if (-not $existingBinding) {
+            New-WebBinding -Name "Default Web Site" -Protocol http -Port $port
+        } else {
+            Write-Host "El sitio ya tiene un binding en el puerto $port."
+        }
+
+        Start-WebSite -Name "Default Web Site"
+    } else {
+        Write-Host "No se encontró 'Default Web Site'. Creándolo..."
+        New-WebSite -Name "Default Web Site" -Port $port -PhysicalPath "C:\inetpub\wwwroot"
+    }
+
+    # Verificar si el puerto está escuchando
+    Write-Host "Verificando si el puerto $port está escuchando..."
+    try {
+        $portListening = Test-NetConnection -ComputerName localhost -Port $port -ErrorAction Stop
+        if ($portListening.TcpTestSucceeded) {
+            Write-Host "IIS está corriendo correctamente en http://localhost:$port"
+        } else {
+            Write-Host "Error: El puerto $port no está escuchando. Revisa la configuración de IIS."
+        }
+    } catch {
+        Write-Host "Error: No se pudo verificar el puerto $port. Asegúrate de que sea un puerto válido."
+    }
+
+    # Configurar SSL para IIS
+    Write-Host "Configurando SSL para IIS..."
+    $httpsPort = $port + 100
+    $certThumbprint = "8BC8D68FD28472D2301DD77565A0DEE42DDB625E"
+
+    # Verificar si el certificado ya existe
+    $cert = Get-Item "Cert:\LocalMachine\My\$certThumbprint" -ErrorAction SilentlyContinue
+    if (-not $cert) {
+        Write-Host "Error: No se encontró el certificado con la huella especificada."
+        return
+    }
+
+    # Exportar el certificado a un archivo PFX
+    $pfxFile = "C:\Temp\iis_cert.pfx"
+    $pfxPassword = ConvertTo-SecureString -String "MiClaveSSL" -AsPlainText -Force
+    Export-PfxCertificate -Cert $cert -FilePath $pfxFile -Password $pfxPassword
+
+    # Importar el certificado al almacén de certificados de IIS
+    Import-PfxCertificate -FilePath $pfxFile -CertStoreLocation Cert:\LocalMachine\My -Password $pfxPassword
+
+    # Agregar el binding HTTPS al sitio
+    $bindingInfo = "*:$($httpsPort):"
+    $existingHttpsBinding = Get-WebBinding -Name "Default Web Site" | Where-Object { $_.bindingInformation -eq $bindingInfo }
+    if (-not $existingHttpsBinding) {
+        # Especificar el nombre de host como "localhost" y SSLFlags = 0
+        New-WebBinding -Name "Default Web Site" -Protocol https -Port $httpsPort -HostHeader "localhost" -SslFlags 0
+        Write-Host "Binding HTTPS agregado en el puerto $httpsPort."
+    } else {
+        Write-Host "El sitio ya tiene un binding HTTPS en el puerto $httpsPort."
+    }
+
+    # Verificar si el puerto HTTPS está escuchando
+    Write-Host "Verificando si el puerto HTTPS $httpsPort está escuchando..."
+    try {
+        $httpsPortListening = Test-NetConnection -ComputerName localhost -Port $httpsPort -ErrorAction Stop
+        if ($httpsPortListening.TcpTestSucceeded) {
+            Write-Host "IIS está corriendo correctamente en https://localhost:$httpsPort"
+        } else {
+            Write-Host "Error: El puerto HTTPS $httpsPort no está escuchando. Revisa la configuración de IIS."
+        }
+    } catch {
+        Write-Host "Error: No se pudo verificar el puerto HTTPS $httpsPort. Asegúrate de que sea un puerto válido."
+    }
+}
+
+function Navegar-FTP {
+    param (
+        [string]$ftpServer = "192.168.0.224",
+        [string]$ftpUser = "anonymous",  # Usuario anónimo
+        [string]$ftpPassword = ""        # Contraseña vacía para usuario anónimo
+    )
+
+    # Ruta inicial en el servidor FTP
+    $rutaActual = "/Servidores"
+
+    while ($true) {
+        Clear-Host
+        Write-Host "Navegando por FTP: $rutaActual"
+        Write-Host "--------------------------------"
+
+        # Listar carpetas y archivos en la ruta actual
+        try {
+            # Crear una sesión FTP con SSL/TLS y aceptar certificados autofirmados
+            $sessionOptions = New-Object WinSCP.SessionOptions -Property @{
+                Protocol = [WinSCP.Protocol]::Ftp
+                HostName = $ftpServer
+                UserName = $ftpUser
+                Password = $ftpPassword
+                FtpSecure = [WinSCP.FtpSecure]::Explicit
+                GiveUpSecurityAndAcceptAnyTlsHostCertificate = $true
+            }
+
+            $session = New-Object WinSCP.Session
+            $session.Open($sessionOptions)
+
+            # Obtener la lista de archivos y carpetas
+            $listaArchivos = $session.ListDirectory($rutaActual).Files
+
+            if ($listaArchivos.Count -eq 0) {
+                Write-Host "No se encontraron archivos o carpetas en esta ubicación."
+                Read-Host "Presione Enter para volver..."
+                return
+            }
+
+            # Mostrar carpetas y archivos
+            Write-Host "1. Salir"
+            $contador = 2
+            $opciones = @{}
+            $tipoElemento = @{}
+
+            foreach ($archivo in $listaArchivos) {
+                $nombre = $archivo.Name
+
+                if ($archivo.IsDirectory) {
+                    Write-Host "$contador. [Carpeta] $nombre"
+                    $opciones[$contador] = $nombre
+                    $tipoElemento[$contador] = "carpeta"
+                } else {
+                    Write-Host "$contador. [Archivo] $nombre"
+                    $opciones[$contador] = $nombre
+                    $tipoElemento[$contador] = "archivo"
+                }
+                $contador++
+            }
+
+            Write-Host "--------------------------------"
+            $seleccion = [int] (Read-Host "Seleccione una opción (1-$(($contador - 1)))")
+
+        if ($seleccion -eq 1) {
+                # Salir de la función
+                Write-Host "Saliendo del navegador FTP..."
+                return
+            } elseif ($opciones.ContainsKey($seleccion)) {
+                $elementoSeleccionado = $opciones[$seleccion]
+                $tipo = $tipoElemento[$seleccion]
+
+                if ($tipo -eq "carpeta") {
+                    # Es una carpeta, navegar a ella
+                    $rutaActual = "$rutaActual/$elementoSeleccionado"
+                } else {
+                    # Es un archivo, preguntar si desea descargarlo
+                    $confirmacion = Read-Host "¿Desea descargar el archivo $elementoSeleccionado? (s/n)"
+                    if ($confirmacion -eq "s" -or $confirmacion -eq "S") {
+                        $rutaDestino = "C:\FTP-Descargas"
+                        if (!(Test-Path -Path $rutaDestino)) {
+                            New-Item -ItemType Directory -Path $rutaDestino | Out-Null
+                        }
+                        Write-Host "Descargando $elementoSeleccionado a $rutaDestino..."
+                        # Descargar el archivo
+                        $session.GetFiles("$rutaActual/$elementoSeleccionado", "$rutaDestino\$elementoSeleccionado").Check()
+                        Write-Host "Descarga completada en: $rutaDestino\$elementoSeleccionado"
+                        Read-Host "Presione Enter para continuar..."
+                    }
+                }
+            } else {
+                Write-Host "Opción no válida."
+                Read-Host "Presione Enter para continuar..."
+            }
+
+        } catch {
+            Write-Host "Error: $_"
+            Read-Host "Presione Enter para continuar..."
+        } finally {
+            if ($session -ne $null) {
+                $session.Dispose()
+            }
+        }
     }
 }
