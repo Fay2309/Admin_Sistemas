@@ -1354,3 +1354,97 @@ function Navegar-FTP {
         }
     }
 }
+
+# 4. Instalar SquirrelMail
+function Install-SquirrelMail {
+    Write-Host "Instalando SquirrelMail..." -ForegroundColor Cyan
+
+    $SquirrelMailURL = "https://downloads.sourceforge.net/project/squirrelmail/stable/1.4.22/squirrelmail-webmail-1.4.22.zip"
+    $SquirrelMailZip = "C:\Temp\squirrelmail-webmail-1.4.22.zip"
+    $SquirrelMailPath = "C:\xampp\htdocs\webmail"
+
+    if (-not (Test-Path $SquirrelMailZip)) {
+        Invoke-WebRequest -Uri $SquirrelMailURL -OutFile $SquirrelMailZip -UseBasicParsing
+    }
+
+    Expand-Archive -Path $SquirrelMailZip -DestinationPath $SquirrelMailPath -Force
+
+    $SubFolder = Get-ChildItem -Directory $SquirrelMailPath | Select-Object -First 1
+    if ($SubFolder) {
+        Move-Item -Path "$($SubFolder.FullName)\*" -Destination $SquirrelMailPath -Force
+        Remove-Item -Path $SubFolder.FullName -Recurse -Force
+    }
+
+    $ConfigFile = "$SquirrelMailPath\config\config.php"
+
+    if (-not (Test-Path $ConfigFile)) {
+        Copy-Item "$SquirrelMailPath\config\config_default.php" $ConfigFile
+    }
+
+    (Get-Content "C:\xampp\htdocs\webmail\config\config.php") -replace '\$domain\s*=\s*''[^'']+'';', '$domain = ''gael.com'';' | Set-Content "C:\xampp\htdocs\webmail\config\config.php"
+    (Get-Content "C:\xampp\htdocs\webmail\config\config.php") -replace '\$data_dir\s*=\s*''[^'']+'';', '$data_dir = ''C:/xampp/htdocs/webmail/data/'';' | Set-Content "C:\xampp\htdocs\webmail\config\config.php"
+
+    Write-Host "SquirrelMail configurado en http://localhost/webmail" -ForegroundColor Green
+}
+
+function InstallMercury{
+    $mercuryURL = "https://download-us.pmail.com/m32-491.exe"
+    $mercryFolder = "C:\Mercury"
+    $installerPath = "$mercryFolder\MercuryInstall.exe"
+
+    $inipath = "$mercryFolder\mercury.ini"
+    $nssmUrls = "https://nssm.cc/release/nssm-2.24.zip"
+    $nssmFolder = "$mercryFolder\nssm"
+
+    New-Item -ItemType Directory -Path $mercryFolder -Force | Out-Null
+
+    Write-Host "Descargando mercury..."
+    Invoke-WebRequest -Uri $mercuryURL -OutFile $installerPath
+
+    Start-Process -FilePath $installerPath -Wait
+
+    if (-not (Test-Path $inipath)){
+        Write-Error "No hay un archivo de configuración en esta ruta..."
+        exit 1 
+    }
+
+    Write-Host "Configurando Servicio"
+
+    $content = Get-Content $inipath
+
+    $content = Configurarini $content "MercuryS" "TCP/IP_port" "25"
+    $content = Configurarini $content "MercuryP" "TCP/IP_port" "110"
+    $content = Configurarini $content "MercuryP" "POP3Enabled" "1"
+    $content = Configurarini $content "MercuryS" "SMTPEnabled" "1"
+
+    $content | Set-Content $inipath
+
+    Start-Process "C:\Mercury\mercury.exe" 
+
+}
+
+function Configurarini($lines, $section, $key, $value){
+    $sectionIndex = $lines.IndexOf("[$section]")
+    if($sectionIndex -lt 0) {
+        $lines += "[$section]", "$key=$value"
+    } else {
+        $i = $sectionIndex + 1
+        $found = $false
+        while ($i -lt $lines.Length -and $lines[$i] -notmatch "^\[.*\]"){
+            if ($lines[$i] -match "^$key="){
+                $lines[$i] = "$key=$value"
+                $found = $true
+                break
+            }
+            $i++
+        }
+        if(-not $found){
+            $lines = @(
+                $lines[0..$sectionIndex]
+                "$key=$value"
+                $lines[($sectionIndex + 1)..($lines.Length - 1)]
+            )
+        }
+    }
+    return $lines
+}
